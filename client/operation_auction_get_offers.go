@@ -1,8 +1,11 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ao-data/albiondata-client/lib"
 	"github.com/ao-data/albiondata-client/log"
@@ -89,5 +92,52 @@ func (op operationAuctionGetOffersResponse) Process(state *albionState) {
 
 	identifier, _ := uuid.NewV4()
 	log.Infof("Sending %d live market sell orders to ingest (Identifier: %s)", len(orders), identifier)
+	
+	// Send to public uploaders (original behavior)
 	sendMsgToPublicUploaders(upload, lib.NatsMarketOrdersIngest, state, identifier.String())
+	
+	// Send to private HTTP endpoints (NEW!)
+	op.sendToPrivateHTTP(upload, state, identifier.String())
+}
+
+// NEW FUNCTION: Send to private HTTP endpoint
+func (op operationAuctionGetOffersResponse) sendToPrivateHTTP(upload lib.MarketUpload, state *albionState, identifier string) {
+	if len(state.PrivateHTTPURLs) == 0 {
+		return
+	}
+
+	for _, baseURL := range state.PrivateHTTPURLs {
+		// Ensure URL ends with /ingest
+		url := baseURL
+		if !strings.HasSuffix(url, "/ingest") {
+			url = strings.TrimSuffix(url, "/") + "/ingest"
+		}
+
+		// Marshal upload to JSON
+		jsonData, err := json.Marshal(upload)
+		if err != nil {
+			log.Errorf("Failed to marshal data for private HTTP: %v", err)
+			continue
+		}
+
+		// Create HTTP client with timeout
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+		}
+
+		// Send POST request
+		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Errorf("Failed to send to private HTTP endpoint %s: %v", url, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		// Check response
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			log.Infof("✅ Successfully sent %d orders to private endpoint: %s (Identifier: %s)", len(upload.Orders), url, identifier)
+		} else {
+			log.Errorf("Private HTTP endpoint returned status %d for %s", resp.StatusCode, url)
+		}
+	}
 }
